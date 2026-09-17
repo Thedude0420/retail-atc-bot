@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -12,7 +13,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Paper Trading Agent", version="0.2.1")
+app = FastAPI(title="Paper Trading Agent", version="0.2.2")
 
 
 def credentials() -> tuple[str, str]:
@@ -99,6 +100,7 @@ def recent_closes(symbol: str, days: int = 40) -> list[float]:
         start=start,
         end=end,
         limit=days,
+        feed=DataFeed.IEX,
     )
     bars = data_client().get_stock_bars(request)
     rows = bars.data.get(symbol.upper(), [])
@@ -132,6 +134,7 @@ def data_diagnostic(symbol: str = "SPY"):
         return {
             "status": "ok",
             "alpaca_data_connection": "ok",
+            "data_feed": "IEX",
             "symbol": result.symbol,
             "bars_received": len(closes),
             "latest_close": result.price,
