@@ -21,10 +21,13 @@ Never commit API credentials to GitHub.
 - GET /account
 - GET /positions
 - GET /orders
+- GET /signal
+- GET /risk-check
+- GET /data-diagnostic
 - POST /paper-test-order
 
 ## Run
 pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 8080
 
-Next we will add a strategy/signal engine and a separate risk engine.
+Railway deployment sync marker: 2026-09-17
