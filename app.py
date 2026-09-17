@@ -12,7 +12,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Paper Trading Agent", version="0.2.0")
+app = FastAPI(title="Paper Trading Agent", version="0.2.1")
 
 
 def credentials() -> tuple[str, str]:
@@ -122,6 +122,28 @@ def signal(symbol: str = "SPY", fast_window: int = 5, slow_window: int = 20):
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/data-diagnostic")
+def data_diagnostic(symbol: str = "SPY"):
+    try:
+        closes = recent_closes(symbol, days=40)
+        result = generate_signal(symbol, closes, 5, 20)
+        return {
+            "status": "ok",
+            "alpaca_data_connection": "ok",
+            "symbol": result.symbol,
+            "bars_received": len(closes),
+            "latest_close": result.price,
+            "fast_sma": result.fast_sma,
+            "slow_sma": result.slow_sma,
+            "action": result.action,
+            "reason": result.reason,
+            "paper_only": True,
+            "order_submitted": False,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Alpaca data diagnostic failed: {exc}")
 
 
 @app.get("/risk-check")
