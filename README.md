@@ -30,4 +30,4 @@ Never commit API credentials to GitHub.
 pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 8080
 
-Railway deployment sync marker: 2026-09-17
+Railway deployment sync marker: 2026-09-18
