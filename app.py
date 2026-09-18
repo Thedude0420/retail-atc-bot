@@ -198,7 +198,9 @@ def signal(symbol: str="SPY", _auth=Header(default=None)):
     return {"symbol":r.symbol,"action":r.action,"price":r.price,"fast_sma":r.fast_sma,"slow_sma":r.slow_sma,"reason":r.reason,"live_trading_enabled":live_trading_enabled(),"order_submitted":False}
 
 @app.get("/trade-cycle")
-def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=False):
+def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=False, _auth=Header(default=None), internal: bool=False):
+    if not internal and (execute or live_trading_enabled()):
+        require_trade_token(_auth)
     try:
         symbol=symbol.upper(); client=trading_client(); account=client.get_account(); position=get_position(client,symbol)
         position_value=float(position.market_value) if position else 0.0
