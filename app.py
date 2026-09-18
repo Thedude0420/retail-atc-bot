@@ -8,8 +8,8 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 from risk import check_risk
 from strategy import generate_signal
@@ -51,6 +51,42 @@ def safe_notional_limit() -> float:
     if live_trading_enabled():
         return float(os.getenv("LIVE_ORDER_MAX_NOTIONAL", "5.00"))
     return float(os.getenv("MAX_TEST_NOTIONAL", "5.00"))
+
+
+def live_budget_limit() -> float:
+    return float(os.getenv("LIVE_TRADING_BUDGET", "50.00"))
+
+
+def live_budget_start() -> datetime:
+    raw = os.getenv("LIVE_TRADING_START_AT", "")
+    if raw:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return datetime.now(timezone.utc) - timedelta(days=30)
+
+
+def live_budget_spent(client: TradingClient) -> float:
+    if not live_trading_enabled():
+        return 0.0
+    request = GetOrdersRequest(
+        status=QueryOrderStatus.ALL,
+        limit=500,
+        after=live_budget_start(),
+        direction=None,
+        nested=True,
+    )
+    orders = client.get_orders(filter=request)
+    spent = 0.0
+    for order in orders:
+        notional = getattr(order, "notional", None)
+        if notional is not None:
+            spent += abs(float(notional))
+        elif getattr(order, "filled_qty", None) and getattr(order, "filled_avg_price", None):
+            spent += abs(float(order.filled_qty) * float(order.filled_avg_price))
+    return spent
+
+
+def live_budget_remaining(client: TradingClient) -> float:
+    return max(live_budget_limit() - live_budget_spent(client), 0.0)
 
 
 @app.get("/")
@@ -245,6 +281,21 @@ def risk_check_endpoint(symbol: str = "SPY", proposed_notional: float = 5.0):
         last_equity = float(getattr(account, "last_equity", account.portfolio_value))
         daily_pnl = float(account.portfolio_value) - last_equity
 
+        if live_trading_enabled() and proposed_notional <= 0:
+            return {
+                "status": "blocked",
+                "stage": "live_budget",
+                "symbol": symbol,
+                "signal": signal_result.action,
+                "reason": "30-day live trading budget has been exhausted.",
+                "live_budget": live_budget_limit(),
+                "live_budget_spent": live_budget_spent(client),
+                "live_budget_remaining": 0.0,
+                "paper_only": False,
+                "live_trading_enabled": True,
+                "order_submitted": False,
+            }
+
         decision = check_risk(
             account_equity=float(account.portfolio_value),
             proposed_notional=proposed_notional,
@@ -303,8 +354,9 @@ def trade_cycle(
                 }
             proposed_notional = min(proposed_notional, max(position_value, 0.0))
 
-        if live_trading_enabled() and proposed_notional > safe_notional_limit():
-            proposed_notional = safe_notional_limit()
+        if live_trading_enabled():
+            proposed_notional = min(proposed_notional, safe_notional_limit())
+            proposed_notional = min(proposed_notional, live_budget_remaining(client))
 
         decision = check_risk(
             account_equity=float(account.portfolio_value),
@@ -331,6 +383,11 @@ def trade_cycle(
             "live_trading_enabled": live_trading_enabled(),
             "order_submitted": False,
         }
+
+        if live_trading_enabled():
+            result["live_budget"] = live_budget_limit()
+            result["live_budget_spent"] = live_budget_spent(client)
+            result["live_budget_remaining"] = live_budget_remaining(client)
 
         if not decision.allowed:
             return result
