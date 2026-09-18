@@ -34,7 +34,7 @@ def autonomous_trade_loop() -> None:
     while True:
         try:
             if autonomous_trading_enabled():
-                result = trade_cycle(symbol="SPY", proposed_notional=5.0, execute=True)
+                result = trade_cycle(symbol="SPY", proposed_notional=5.0, execute=True, internal=True)
                 print(f"AUTONOMOUS_TRADE_CYCLE result={result}", flush=True)
         except Exception as exc:
             print(f"AUTONOMOUS_TRADE_CYCLE error={_diagnostic_error(exc)} order_submitted=false", flush=True)
