@@ -95,10 +95,31 @@ def run_alpaca_connectivity_diagnostic() -> None:
         results.append("live=not_configured")
     print("ALPACA_DIAGNOSTIC " + " ".join(results) + " orders_submitted=false", flush=True)
 
+def run_readonly_trade_check() -> None:
+    if not live_trading_enabled():
+        return
+    try:
+        client = trading_client()
+        account = client.get_account()
+        closes = recent_closes("SPY")
+        sig = generate_signal("SPY", closes, 5, 20)
+        remaining = live_budget_remaining(client)
+        clock = client.get_clock()
+        position = get_position(client, "SPY")
+        position_value = float(position.market_value) if position else 0.0
+        daily_pnl = float(account.portfolio_value) - float(getattr(account, "last_equity", account.portfolio_value))
+        proposed = min(50.0, safe_notional_limit(), remaining)
+        decision = check_risk(float(account.portfolio_value), proposed, position_value, float(os.getenv("MAX_POSITION_PCT","0.10")), float(os.getenv("MAX_DAILY_LOSS_PCT","0.02")), daily_pnl)
+        print(f"READONLY_TRADE_CHECK symbol=SPY signal={sig.action} price={sig.price} risk_allowed={decision.allowed} approved_notional={decision.max_notional} market_open={clock.is_open} budget_remaining={remaining} order_submitted=false", flush=True)
+    except Exception as exc:
+        print(f"READONLY_TRADE_CHECK error={_diagnostic_error(exc)} order_submitted=false", flush=True)
+
 @app.on_event("startup")
 def startup():
     try: run_alpaca_connectivity_diagnostic()
     except Exception as exc: print(f"ALPACA_DIAGNOSTIC failed: {_diagnostic_error(exc)}", flush=True)
+    try: run_readonly_trade_check()
+    except Exception as exc: print(f"READONLY_TRADE_CHECK failed: {_diagnostic_error(exc)}", flush=True)
 
 @app.get("/")
 def root():
