@@ -204,7 +204,10 @@ def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=F
         result={"status":"ready" if decision.allowed else "blocked","symbol":symbol,"signal":sig.action,"signal_reason":sig.reason,"price":sig.price,"fast_sma":sig.fast_sma,"slow_sma":sig.slow_sma,"daily_pnl":daily_pnl,"risk_allowed":decision.allowed,"risk_reason":decision.reason,"approved_notional":decision.max_notional,"live_trading_enabled":live_trading_enabled(),"order_submitted":False}
         if live_trading_enabled():
             result.update({"live_budget":live_budget_limit(),"live_budget_spent":live_budget_spent(client),"live_budget_remaining":live_budget_remaining(client)})
-        if sig.action=="BUY" and position_qty > 0:\n            result.update(status="no_action", risk_reason="BUY signal while a long position is already held")\n            return result\n        if not decision.allowed or sig.action=="HOLD":
+        if sig.action=="BUY" and position_qty > 0:
+            result.update(status="no_action", risk_reason="BUY signal while a long position is already held")
+            return result
+        if not decision.allowed or sig.action=="HOLD":
             if sig.action=="HOLD": result.update(status="no_action",risk_reason="No trade signal")
             return result
         if has_open_order(client,symbol):
