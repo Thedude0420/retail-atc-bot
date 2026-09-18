@@ -145,9 +145,14 @@ def startup():
     except Exception as exc: print(f"ALPACA_DIAGNOSTIC failed: {_diagnostic_error(exc)}", flush=True)
     try: run_readonly_trade_check()
     except Exception as exc: print(f"READONLY_TRADE_CHECK failed: {_diagnostic_error(exc)}", flush=True)
+    if autonomous_trading_enabled():
+        import threading
+        threading.Thread(target=autonomous_trade_loop, daemon=True, name="autonomous-trader").start()
+        print("AUTONOMOUS_TRADING started interval_seconds=" + os.getenv("AUTO_TRADE_INTERVAL_SECONDS", "900"), flush=True)
 
 @app.get("/")
-def root():
+def root(_auth=Header(default=None)):
+    require_trade_token(_auth)
     return {"service":"stock-trading-agent","paper_only":paper_only(),"live_trading_enabled":live_trading_enabled(),"live_order_execution_enabled":live_order_execution_enabled(),"auto_trading_enabled":os.getenv("AUTO_TRADING_ENABLED","false").lower()=="true","live_order_max_notional":safe_notional_limit(),"status":"ok"}
 
 @app.get("/health")
@@ -170,20 +175,24 @@ def has_open_order(client: TradingClient, symbol: str) -> bool:
     return any(o.symbol.upper()==symbol.upper() and str(o.status).lower() in open_statuses for o in client.get_orders())
 
 @app.get("/account")
-def account():
+def account(_auth=Header(default=None)):
+    require_trade_token(_auth)
     a=trading_client().get_account()
     return {"id":str(a.id),"status":str(a.status),"cash":str(a.cash),"buying_power":str(a.buying_power),"portfolio_value":str(a.portfolio_value),"last_equity":str(getattr(a,"last_equity",a.portfolio_value)),"paper_only":paper_only(),"live_trading_enabled":live_trading_enabled()}
 
 @app.get("/positions")
-def positions():
+def positions(_auth=Header(default=None)):
+    require_trade_token(_auth)
     return [{"symbol":p.symbol,"qty":str(p.qty),"market_value":str(p.market_value),"avg_entry_price":str(p.avg_entry_price),"unrealized_pl":str(p.unrealized_pl)} for p in trading_client().get_all_positions()]
 
 @app.get("/orders")
-def orders():
+def orders(_auth=Header(default=None)):
+    require_trade_token(_auth)
     return [{"id":str(o.id),"symbol":o.symbol,"side":str(o.side),"type":str(o.type),"qty":str(o.qty),"status":str(o.status)} for o in trading_client().get_orders()]
 
 @app.get("/signal")
-def signal(symbol: str="SPY"):
+def signal(symbol: str="SPY", _auth=Header(default=None)):
+    require_trade_token(_auth)
     closes=recent_closes(symbol)
     r=generate_signal(symbol,closes,5,20)
     return {"symbol":r.symbol,"action":r.action,"price":r.price,"fast_sma":r.fast_sma,"slow_sma":r.slow_sma,"reason":r.reason,"live_trading_enabled":live_trading_enabled(),"order_submitted":False}
