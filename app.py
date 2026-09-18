@@ -89,6 +89,56 @@ def live_budget_remaining(client: TradingClient) -> float:
     return max(live_budget_limit() - live_budget_spent(client), 0.0)
 
 
+def _diagnostic_error(exc: Exception) -> str:
+    message = str(exc)
+    for name in (
+        "ALPACA_API_KEY",
+        "ALPACA_API_SECRET",
+        "LIVE_ALPACA_API_KEY",
+        "LIVE_ALPACA_API_SECRET",
+    ):
+        secret = os.getenv(name, "")
+        if secret:
+            message = message.replace(secret, "***")
+    return message
+
+
+def run_alpaca_connectivity_diagnostic() -> None:
+    """Read-only verification of configured Alpaca paper and live credentials."""
+    results = []
+
+    paper_key = os.getenv("ALPACA_API_KEY")
+    paper_secret = os.getenv("ALPACA_API_SECRET")
+    if paper_key and paper_secret:
+        try:
+            client = TradingClient(paper_key, paper_secret, paper=True)
+            account = client.get_account()
+            results.append(f"paper=connected account_id={account.id}")
+        except Exception as exc:
+            results.append(f"paper=error error={_diagnostic_error(exc)}")
+    else:
+        results.append("paper=not_configured")
+
+    live_key = os.getenv("LIVE_ALPACA_API_KEY")
+    live_secret = os.getenv("LIVE_ALPACA_API_SECRET")
+    if live_key and live_secret:
+        try:
+            client = TradingClient(live_key, live_secret, paper=False)
+            account = client.get_account()
+            results.append(f"live=connected account_id={account.id}")
+        except Exception as exc:
+            results.append(f"live=error error={_diagnostic_error(exc)}")
+    else:
+        results.append("live=not_configured")
+
+    print(
+        "ALPACA_DIAGNOSTIC "
+        + " ".join(results)
+        + " orders_submitted=false",
+        flush=True,
+    )
+
+
 @app.get("/")
 def root():
     return {
@@ -136,6 +186,11 @@ def run_one_paper_test_if_enabled() -> None:
 
 @app.on_event("startup")
 def startup_test_order() -> None:
+    try:
+        run_alpaca_connectivity_diagnostic()
+    except Exception as exc:
+        print(f"ALPACA_DIAGNOSTIC failed: {_diagnostic_error(exc)}", flush=True)
+
     try:
         run_one_paper_test_if_enabled()
     except Exception as exc:
@@ -286,7 +341,7 @@ def risk_check_endpoint(symbol: str = "SPY", proposed_notional: float = 5.0):
                 "status": "blocked",
                 "stage": "live_budget",
                 "symbol": symbol,
-                "signal": signal_result.action,
+                "signal": "UNKNOWN",
                 "reason": "30-day live trading budget has been exhausted.",
                 "live_budget": live_budget_limit(),
                 "live_budget_spent": live_budget_spent(client),
