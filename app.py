@@ -13,7 +13,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Paper Trading Agent", version="0.3.0")
+app = FastAPI(title="Paper Trading Agent", version="0.3.1")
 
 
 def credentials() -> tuple[str, str]:
@@ -40,6 +40,49 @@ def root():
         "auto_trading_enabled": os.getenv("AUTO_TRADING_ENABLED", "false").lower() == "true",
         "status": "ok",
     }
+
+
+def run_one_paper_test_if_enabled() -> None:
+    """Run one idempotent $5 SPY paper BUY for deployment verification."""
+    if os.getenv("RUN_ONE_PAPER_TEST", "false").lower() != "true":
+        return
+    if os.getenv("ENABLE_TEST_ORDERS", "false").lower() != "true":
+        print("ONE_PAPER_TEST skipped: ENABLE_TEST_ORDERS is false", flush=True)
+        return
+
+    client = trading_client()
+    client_order_id = "retail-atc-one-paper-test-spy-5"
+
+    # Idempotency guard: never submit the same test order twice.
+    for existing in client.get_orders():
+        if getattr(existing, "client_order_id", None) == client_order_id:
+            print(
+                f"ONE_PAPER_TEST existing order id={existing.id} status={existing.status}",
+                flush=True,
+            )
+            return
+
+    order = client.submit_order(
+        order_data=MarketOrderRequest(
+            symbol="SPY",
+            notional=5.00,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            client_order_id=client_order_id,
+        )
+    )
+    print(
+        f"ONE_PAPER_TEST submitted order_id={order.id} status={order.status}",
+        flush=True,
+    )
+
+
+@app.on_event("startup")
+def startup_test_order() -> None:
+    try:
+        run_one_paper_test_if_enabled()
+    except Exception as exc:
+        print(f"ONE_PAPER_TEST failed: {exc}", flush=True)
 
 
 @app.get("/health")
