@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -14,7 +14,32 @@ from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Stock Trading Agent", version="0.4.1")
+app = FastAPI(title="Stock Trading Agent", version="0.5.0")
+
+
+def require_trade_token(authorization: str | None = Header(default=None)):
+    expected = os.getenv("TRADE_API_TOKEN", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Trading API authentication is not configured")
+    if authorization != f"Bearer {expected}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def autonomous_trading_enabled() -> bool:
+    return live_trading_enabled() and live_order_execution_enabled() and os.getenv("AUTO_TRADING_ENABLED", "false").lower() == "true"
+
+
+def autonomous_trade_loop() -> None:
+    interval = max(int(os.getenv("AUTO_TRADE_INTERVAL_SECONDS", "900")), 300)
+    while True:
+        try:
+            if autonomous_trading_enabled():
+                result = trade_cycle(symbol="SPY", proposed_notional=5.0, execute=True)
+                print(f"AUTONOMOUS_TRADE_CYCLE result={result}", flush=True)
+        except Exception as exc:
+            print(f"AUTONOMOUS_TRADE_CYCLE error={_diagnostic_error(exc)} order_submitted=false", flush=True)
+        import time
+        time.sleep(interval)
 
 def live_trading_enabled() -> bool:
     return os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"
@@ -179,7 +204,7 @@ def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=F
         result={"status":"ready" if decision.allowed else "blocked","symbol":symbol,"signal":sig.action,"signal_reason":sig.reason,"price":sig.price,"fast_sma":sig.fast_sma,"slow_sma":sig.slow_sma,"daily_pnl":daily_pnl,"risk_allowed":decision.allowed,"risk_reason":decision.reason,"approved_notional":decision.max_notional,"live_trading_enabled":live_trading_enabled(),"order_submitted":False}
         if live_trading_enabled():
             result.update({"live_budget":live_budget_limit(),"live_budget_spent":live_budget_spent(client),"live_budget_remaining":live_budget_remaining(client)})
-        if not decision.allowed or sig.action=="HOLD":
+        if sig.action=="BUY" and position_qty > 0:\n            result.update(status="no_action", risk_reason="BUY signal while a long position is already held")\n            return result\n        if not decision.allowed or sig.action=="HOLD":
             if sig.action=="HOLD": result.update(status="no_action",risk_reason="No trade signal")
             return result
         if has_open_order(client,symbol):
