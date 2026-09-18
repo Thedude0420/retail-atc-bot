@@ -109,7 +109,7 @@ def run_readonly_trade_check() -> None:
         position_value = float(position.market_value) if position else 0.0
         daily_pnl = float(account.portfolio_value) - float(getattr(account, "last_equity", account.portfolio_value))
         proposed = min(50.0, safe_notional_limit(), remaining)
-        decision = check_risk(float(account.portfolio_value), proposed, position_value, float(os.getenv("MAX_POSITION_PCT","0.10")), float(os.getenv("MAX_DAILY_LOSS_PCT","0.02")), daily_pnl)
+        decision = check_risk(account_equity=float(account.portfolio_value), proposed_notional=proposed, position_market_value=position_value, max_position_pct=float(os.getenv("MAX_POSITION_PCT","0.10")), max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT","0.02")), daily_pnl=daily_pnl)
         print(f"READONLY_TRADE_CHECK symbol=SPY signal={sig.action} price={sig.price} risk_allowed={decision.allowed} approved_notional={decision.max_notional} market_open={clock.is_open} budget_remaining={remaining} order_submitted=false", flush=True)
     except Exception as exc:
         print(f"READONLY_TRADE_CHECK error={_diagnostic_error(exc)} order_submitted=false", flush=True)
@@ -175,7 +175,7 @@ def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=F
             return {"status":"no_action","stage":"position_check","symbol":symbol,"signal":"SELL","reason":"SELL signal but no long position is held; short selling is disabled.","order_submitted":False}
         if live_trading_enabled():
             proposed_notional=min(proposed_notional,safe_notional_limit(),live_budget_remaining(client))
-        decision=check_risk(float(account.portfolio_value),proposed_notional,position_value,float(os.getenv("MAX_POSITION_PCT","0.10")),float(os.getenv("MAX_DAILY_LOSS_PCT","0.02")),daily_pnl)
+        decision=check_risk(account_equity=float(account.portfolio_value), proposed_notional=proposed_notional, position_market_value=position_value, max_position_pct=float(os.getenv("MAX_POSITION_PCT","0.10")), max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT","0.02")), daily_pnl=daily_pnl)
         result={"status":"ready" if decision.allowed else "blocked","symbol":symbol,"signal":sig.action,"signal_reason":sig.reason,"price":sig.price,"fast_sma":sig.fast_sma,"slow_sma":sig.slow_sma,"daily_pnl":daily_pnl,"risk_allowed":decision.allowed,"risk_reason":decision.reason,"approved_notional":decision.max_notional,"live_trading_enabled":live_trading_enabled(),"order_submitted":False}
         if live_trading_enabled():
             result.update({"live_budget":live_budget_limit(),"live_budget_spent":live_budget_spent(client),"live_budget_remaining":live_budget_remaining(client)})
