@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone, timedelta
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from alpaca.data.historical import StockHistoricalDataClient
@@ -13,7 +14,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Paper Trading Agent", version="0.3.1")
+app = FastAPI(title="Paper Trading Agent", version="0.3.2")
 
 
 def credentials() -> tuple[str, str]:
@@ -51,16 +52,10 @@ def run_one_paper_test_if_enabled() -> None:
         return
 
     client = trading_client()
-    client_order_id = "retail-atc-one-paper-test-spy-5"
-
-    # Idempotency guard: never submit the same test order twice.
-    for existing in client.get_orders():
-        if getattr(existing, "client_order_id", None) == client_order_id:
-            print(
-                f"ONE_PAPER_TEST existing order id={existing.id} status={existing.status}",
-                flush=True,
-            )
-            return
+    # Generate a fresh ID for each explicitly enabled test run. The test flags
+    # are disabled immediately after the verification deployment, so a new
+    # deployment produces exactly one fresh paper order.
+    client_order_id = f"retail-atc-paper-test-spy-5-{uuid4().hex[:12]}"
 
     order = client.submit_order(
         order_data=MarketOrderRequest(
@@ -71,10 +66,16 @@ def run_one_paper_test_if_enabled() -> None:
             client_order_id=client_order_id,
         )
     )
+
+    # Verify end-to-end by retrieving the order back from Alpaca using the
+    # client order ID after submission.
+    verified = client.get_order_by_client_id(client_order_id)
     print(
-        f"ONE_PAPER_TEST submitted order_id={order.id} status={order.status}",
+        f"ONE_PAPER_TEST submitted order_id={order.id} status={order.status} "
+        f"verified_id={verified.id} verified_status={verified.status}",
         flush=True,
     )
+
 
 
 @app.on_event("startup")
