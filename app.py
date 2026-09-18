@@ -13,7 +13,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Paper Trading Agent", version="0.2.2")
+app = FastAPI(title="Paper Trading Agent", version="0.3.0")
 
 
 def credentials() -> tuple[str, str]:
@@ -37,6 +37,7 @@ def root():
         "paper_only": True,
         "live_trading_enabled": False,
         "orders_enabled": os.getenv("ENABLE_TEST_ORDERS", "false").lower() == "true",
+        "auto_trading_enabled": os.getenv("AUTO_TRADING_ENABLED", "false").lower() == "true",
         "status": "ok",
     }
 
@@ -55,6 +56,7 @@ def account():
         "cash": str(account.cash),
         "buying_power": str(account.buying_power),
         "portfolio_value": str(account.portfolio_value),
+        "last_equity": str(getattr(account, "last_equity", account.portfolio_value)),
         "pattern_day_trader": account.pattern_day_trader,
     }
 
@@ -107,6 +109,22 @@ def recent_closes(symbol: str, days: int = 40) -> list[float]:
     return [float(bar.close) for bar in rows]
 
 
+def get_position(client: TradingClient, symbol: str):
+    for position in client.get_all_positions():
+        if position.symbol.upper() == symbol.upper():
+            return position
+    return None
+
+
+def has_open_order(client: TradingClient, symbol: str) -> bool:
+    open_orders = client.get_orders()
+    open_statuses = {"new", "accepted", "pending_new", "partially_filled", "held"}
+    return any(
+        order.symbol.upper() == symbol.upper() and str(order.status).lower() in open_statuses
+        for order in open_orders
+    )
+
+
 @app.get("/signal")
 def signal(symbol: str = "SPY", fast_window: int = 5, slow_window: int = 20):
     try:
@@ -150,16 +168,14 @@ def data_diagnostic(symbol: str = "SPY"):
 
 
 @app.get("/risk-check")
-def risk_check(symbol: str = "SPY", proposed_notional: float = 5.0):
+def risk_check_endpoint(symbol: str = "SPY", proposed_notional: float = 5.0):
     try:
         client = trading_client()
         account = client.get_account()
-        positions = client.get_all_positions()
-        position_value = 0.0
-        for position in positions:
-            if position.symbol.upper() == symbol.upper():
-                position_value = float(position.market_value)
-                break
+        position = get_position(client, symbol)
+        position_value = float(position.market_value) if position else 0.0
+        last_equity = float(getattr(account, "last_equity", account.portfolio_value))
+        daily_pnl = float(account.portfolio_value) - last_equity
 
         decision = check_risk(
             account_equity=float(account.portfolio_value),
@@ -167,16 +183,131 @@ def risk_check(symbol: str = "SPY", proposed_notional: float = 5.0):
             position_market_value=position_value,
             max_position_pct=float(os.getenv("MAX_POSITION_PCT", "0.10")),
             max_daily_loss_pct=float(os.getenv("MAX_DAILY_LOSS_PCT", "0.02")),
-            daily_pnl=0.0,
+            daily_pnl=daily_pnl,
         )
         return {
             "symbol": symbol.upper(),
             "allowed": decision.allowed,
             "reason": decision.reason,
             "max_notional": decision.max_notional,
+            "daily_pnl": daily_pnl,
             "paper_only": True,
             "order_submitted": False,
         }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/trade-cycle")
+def trade_cycle(
+    symbol: str = "SPY",
+    proposed_notional: float = 5.0,
+    execute: bool = False,
+):
+    try:
+        symbol = symbol.upper()
+        client = trading_client()
+        account = client.get_account()
+        position = get_position(client, symbol)
+        position_value = float(position.market_value) if position else 0.0
+        position_qty = float(position.qty) if position else 0.0
+        last_equity = float(getattr(account, "last_equity", account.portfolio_value))
+        daily_pnl = float(account.portfolio_value) - last_equity
+
+        closes = recent_closes(symbol, days=40)
+        signal_result = generate_signal(symbol, closes, 5, 20)
+
+        max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.10"))
+        max_daily_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.02"))
+
+        # SELL only closes an existing long position. This agent does not open shorts.
+        if signal_result.action == "SELL":
+            if position_qty <= 0:
+                return {
+                    "status": "no_action",
+                    "stage": "position_check",
+                    "symbol": symbol,
+                    "signal": "SELL",
+                    "reason": "SELL signal but no long position is held; short selling is disabled.",
+                    "paper_only": True,
+                    "order_submitted": False,
+                }
+            proposed_notional = min(proposed_notional, max(position_value, 0.0))
+
+        decision = check_risk(
+            account_equity=float(account.portfolio_value),
+            proposed_notional=proposed_notional,
+            position_market_value=position_value,
+            max_position_pct=max_position_pct,
+            max_daily_loss_pct=max_daily_loss_pct,
+            daily_pnl=daily_pnl,
+        )
+
+        result = {
+            "status": "ready" if decision.allowed else "blocked",
+            "symbol": symbol,
+            "signal": signal_result.action,
+            "signal_reason": signal_result.reason,
+            "price": signal_result.price,
+            "fast_sma": signal_result.fast_sma,
+            "slow_sma": signal_result.slow_sma,
+            "daily_pnl": daily_pnl,
+            "risk_allowed": decision.allowed,
+            "risk_reason": decision.reason,
+            "approved_notional": decision.max_notional,
+            "paper_only": True,
+            "order_submitted": False,
+        }
+
+        if not decision.allowed:
+            return result
+
+        if signal_result.action == "HOLD":
+            result["status"] = "no_action"
+            result["risk_reason"] = "No trade signal"
+            return result
+
+        if has_open_order(client, symbol):
+            result["status"] = "blocked"
+            result["risk_reason"] = "Open order already exists for symbol"
+            return result
+
+        clock = client.get_clock()
+        if not clock.is_open:
+            result["status"] = "blocked"
+            result["risk_reason"] = "Market is closed"
+            return result
+
+        if not execute:
+            result["status"] = "ready"
+            result["risk_reason"] = "Signal and risk checks passed; execution not requested"
+            return result
+
+        if os.getenv("AUTO_TRADING_ENABLED", "false").lower() != "true":
+            result["status"] = "blocked"
+            result["risk_reason"] = "AUTO_TRADING_ENABLED is false"
+            return result
+
+        if os.getenv("ENABLE_TEST_ORDERS", "false").lower() != "true":
+            result["status"] = "blocked"
+            result["risk_reason"] = "ENABLE_TEST_ORDERS is false"
+            return result
+
+        side = OrderSide.BUY if signal_result.action == "BUY" else OrderSide.SELL
+        order = client.submit_order(
+            order_data=MarketOrderRequest(
+                symbol=symbol,
+                notional=decision.max_notional,
+                side=side,
+                time_in_force=TimeInForce.DAY,
+            )
+        )
+        result["status"] = "submitted"
+        result["order_submitted"] = True
+        result["order_id"] = str(order.id)
+        result["order_status"] = str(order.status)
+        return result
+
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
