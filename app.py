@@ -14,16 +14,32 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from risk import check_risk
 from strategy import generate_signal
 
-app = FastAPI(title="Paper Trading Agent", version="0.3.2")
+app = FastAPI(title="Stock Trading Agent", version="0.4.0")
+
+
+def live_trading_enabled() -> bool:
+    return os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"
+
+
+def live_order_execution_enabled() -> bool:
+    return os.getenv("LIVE_ORDER_EXECUTION_ENABLED", "false").lower() == "true"
+
+
+def paper_only() -> bool:
+    return not live_trading_enabled()
 
 
 def credentials() -> tuple[str, str]:
+    if live_trading_enabled():
+        key = os.environ["LIVE_ALPACA_API_KEY"]
+        secret = os.environ["LIVE_ALPACA_API_SECRET"]
+        return key, secret
     return os.environ["ALPACA_API_KEY"], os.environ["ALPACA_API_SECRET"]
 
 
 def trading_client() -> TradingClient:
     key, secret = credentials()
-    return TradingClient(key, secret, paper=True)
+    return TradingClient(key, secret, paper=paper_only())
 
 
 def data_client() -> StockHistoricalDataClient:
@@ -31,20 +47,30 @@ def data_client() -> StockHistoricalDataClient:
     return StockHistoricalDataClient(key, secret)
 
 
+def safe_notional_limit() -> float:
+    if live_trading_enabled():
+        return float(os.getenv("LIVE_ORDER_MAX_NOTIONAL", "5.00"))
+    return float(os.getenv("MAX_TEST_NOTIONAL", "5.00"))
+
+
 @app.get("/")
 def root():
     return {
-        "service": "paper-trading-agent",
-        "paper_only": True,
-        "live_trading_enabled": False,
+        "service": "stock-trading-agent",
+        "paper_only": paper_only(),
+        "live_trading_enabled": live_trading_enabled(),
+        "live_order_execution_enabled": live_order_execution_enabled(),
         "orders_enabled": os.getenv("ENABLE_TEST_ORDERS", "false").lower() == "true",
         "auto_trading_enabled": os.getenv("AUTO_TRADING_ENABLED", "false").lower() == "true",
+        "live_order_max_notional": safe_notional_limit(),
         "status": "ok",
     }
 
 
 def run_one_paper_test_if_enabled() -> None:
     """Run one idempotent $5 SPY paper BUY for deployment verification."""
+    if live_trading_enabled():
+        return
     if os.getenv("RUN_ONE_PAPER_TEST", "false").lower() != "true":
         return
     if os.getenv("ENABLE_TEST_ORDERS", "false").lower() != "true":
@@ -52,9 +78,6 @@ def run_one_paper_test_if_enabled() -> None:
         return
 
     client = trading_client()
-    # Generate a fresh ID for each explicitly enabled test run. The test flags
-    # are disabled immediately after the verification deployment, so a new
-    # deployment produces exactly one fresh paper order.
     client_order_id = f"retail-atc-paper-test-spy-5-{uuid4().hex[:12]}"
 
     order = client.submit_order(
@@ -67,15 +90,12 @@ def run_one_paper_test_if_enabled() -> None:
         )
     )
 
-    # Verify end-to-end by retrieving the order back from Alpaca using the
-    # client order ID after submission.
     verified = client.get_order_by_client_id(client_order_id)
     print(
         f"ONE_PAPER_TEST submitted order_id={order.id} status={order.status} "
         f"verified_id={verified.id} verified_status={verified.status}",
         flush=True,
     )
-
 
 
 @app.on_event("startup")
@@ -102,6 +122,8 @@ def account():
         "portfolio_value": str(account.portfolio_value),
         "last_equity": str(getattr(account, "last_equity", account.portfolio_value)),
         "pattern_day_trader": account.pattern_day_trader,
+        "paper_only": paper_only(),
+        "live_trading_enabled": live_trading_enabled(),
     }
 
 
@@ -181,7 +203,8 @@ def signal(symbol: str = "SPY", fast_window: int = 5, slow_window: int = 20):
             "fast_sma": result.fast_sma,
             "slow_sma": result.slow_sma,
             "reason": result.reason,
-            "paper_only": True,
+            "paper_only": paper_only(),
+            "live_trading_enabled": live_trading_enabled(),
             "order_submitted": False,
         }
     except Exception as exc:
@@ -204,7 +227,8 @@ def data_diagnostic(symbol: str = "SPY"):
             "slow_sma": result.slow_sma,
             "action": result.action,
             "reason": result.reason,
-            "paper_only": True,
+            "paper_only": paper_only(),
+            "live_trading_enabled": live_trading_enabled(),
             "order_submitted": False,
         }
     except Exception as exc:
@@ -235,7 +259,8 @@ def risk_check_endpoint(symbol: str = "SPY", proposed_notional: float = 5.0):
             "reason": decision.reason,
             "max_notional": decision.max_notional,
             "daily_pnl": daily_pnl,
-            "paper_only": True,
+            "paper_only": paper_only(),
+            "live_trading_enabled": live_trading_enabled(),
             "order_submitted": False,
         }
     except Exception as exc:
@@ -264,7 +289,6 @@ def trade_cycle(
         max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.10"))
         max_daily_loss_pct = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.02"))
 
-        # SELL only closes an existing long position. This agent does not open shorts.
         if signal_result.action == "SELL":
             if position_qty <= 0:
                 return {
@@ -273,10 +297,14 @@ def trade_cycle(
                     "symbol": symbol,
                     "signal": "SELL",
                     "reason": "SELL signal but no long position is held; short selling is disabled.",
-                    "paper_only": True,
+                    "paper_only": paper_only(),
+                    "live_trading_enabled": live_trading_enabled(),
                     "order_submitted": False,
                 }
             proposed_notional = min(proposed_notional, max(position_value, 0.0))
+
+        if live_trading_enabled() and proposed_notional > safe_notional_limit():
+            proposed_notional = safe_notional_limit()
 
         decision = check_risk(
             account_equity=float(account.portfolio_value),
@@ -299,7 +327,8 @@ def trade_cycle(
             "risk_allowed": decision.allowed,
             "risk_reason": decision.reason,
             "approved_notional": decision.max_notional,
-            "paper_only": True,
+            "paper_only": paper_only(),
+            "live_trading_enabled": live_trading_enabled(),
             "order_submitted": False,
         }
 
@@ -332,10 +361,16 @@ def trade_cycle(
             result["risk_reason"] = "AUTO_TRADING_ENABLED is false"
             return result
 
-        if os.getenv("ENABLE_TEST_ORDERS", "false").lower() != "true":
-            result["status"] = "blocked"
-            result["risk_reason"] = "ENABLE_TEST_ORDERS is false"
-            return result
+        if paper_only():
+            if os.getenv("ENABLE_TEST_ORDERS", "false").lower() != "true":
+                result["status"] = "blocked"
+                result["risk_reason"] = "ENABLE_TEST_ORDERS is false"
+                return result
+        else:
+            if not live_order_execution_enabled():
+                result["status"] = "blocked"
+                result["risk_reason"] = "LIVE_ORDER_EXECUTION_ENABLED is false"
+                return result
 
         side = OrderSide.BUY if signal_result.action == "BUY" else OrderSide.SELL
         order = client.submit_order(
@@ -358,6 +393,12 @@ def trade_cycle(
 
 @app.post("/paper-test-order")
 def paper_test_order(symbol: str = "SPY", notional: float = 1.00):
+    if live_trading_enabled():
+        return {
+            "submitted": False,
+            "reason": "Paper test orders are disabled while live trading mode is enabled.",
+            "paper_only": False,
+        }
     if os.getenv("ENABLE_TEST_ORDERS", "false").lower() != "true":
         return {"submitted": False, "reason": "Test orders are disabled.", "paper_only": True}
     if notional <= 0 or notional > float(os.getenv("MAX_TEST_NOTIONAL", "5")):
