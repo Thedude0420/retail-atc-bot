@@ -29,15 +29,18 @@ def autonomous_trading_enabled() -> bool:
     return live_trading_enabled() and live_order_execution_enabled() and os.getenv("AUTO_TRADING_ENABLED", "false").lower() == "true"
 
 
+DEFAULT_SYMBOLS = "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA,AMD,AVGO,NFLX"
+SCAN_SYMBOLS = [s.strip().upper() for s in os.getenv("TRADE_SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
+
 def autonomous_trade_loop() -> None:
     interval = max(int(os.getenv("AUTO_TRADE_INTERVAL_SECONDS", "900")), 300)
     while True:
         try:
             if autonomous_trading_enabled():
-                result = trade_cycle(symbol="SPY", proposed_notional=5.0, execute=True, internal=True)
-                print(f"AUTONOMOUS_TRADE_CYCLE result={result}", flush=True)
+                result = multi_stock_cycle(execute=True, internal=True)
+                print(f"AUTONOMOUS_MULTI_STOCK result={result}", flush=True)
         except Exception as exc:
-            print(f"AUTONOMOUS_TRADE_CYCLE error={_diagnostic_error(exc)} order_submitted=false", flush=True)
+            print(f"AUTONOMOUS_MULTI_STOCK error={_diagnostic_error(exc)} order_submitted=false", flush=True)
         import time
         time.sleep(interval)
 
@@ -196,6 +199,49 @@ def signal(symbol: str="SPY", _auth=Header(default=None)):
     closes=recent_closes(symbol)
     r=generate_signal(symbol,closes,5,20)
     return {"symbol":r.symbol,"action":r.action,"price":r.price,"fast_sma":r.fast_sma,"slow_sma":r.slow_sma,"reason":r.reason,"live_trading_enabled":live_trading_enabled(),"order_submitted":False}
+
+def multi_stock_cycle(execute: bool = False, internal: bool = False):
+    if not internal and execute:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    client = trading_client()
+    clock = client.get_clock()
+    if not clock.is_open:
+        return {"status": "no_action", "reason": "Market is closed", "order_submitted": False}
+    remaining = live_budget_remaining(client) if live_trading_enabled() else safe_notional_limit()
+    if remaining <= 0:
+        return {"status": "blocked", "reason": "Live trading budget exhausted", "budget_remaining": 0.0, "order_submitted": False}
+    signals = []
+    for symbol in SCAN_SYMBOLS:
+        try:
+            sig = generate_signal(symbol, recent_closes(symbol), 5, 20)
+            strength = ((sig.fast_sma / sig.slow_sma) - 1.0) if sig.slow_sma else 0.0
+            signals.append((symbol, sig, strength))
+        except Exception as exc:
+            print(f"MULTI_SCAN symbol={symbol} error={_diagnostic_error(exc)}", flush=True)
+    sells = [x for x in signals if x[1].action == "SELL"]
+    buys = sorted([x for x in signals if x[1].action == "BUY"], key=lambda x: x[2], reverse=True)
+    actions = []
+    submitted = []
+    for symbol, sig, _ in sells:
+        position = get_position(client, symbol)
+        if position is None:
+            continue
+        result = trade_cycle(symbol=symbol, proposed_notional=min(safe_notional_limit(), abs(float(position.market_value))), execute=execute, internal=True)
+        actions.append(result)
+        if result.get("order_submitted"):
+            submitted.append(result)
+    for symbol, sig, strength in buys:
+        if remaining < 0.01:
+            break
+        if get_position(client, symbol) is not None:
+            continue
+        per_trade = min(safe_notional_limit(), remaining)
+        result = trade_cycle(symbol=symbol, proposed_notional=per_trade, execute=execute, internal=True)
+        actions.append(result)
+        if result.get("order_submitted"):
+            submitted.append(result)
+            remaining = live_budget_remaining(client)
+    return {"status": "submitted" if submitted else "no_action", "scanned_symbols": SCAN_SYMBOLS, "buy_candidates": [x[0] for x in buys], "submitted_orders": submitted, "actions": actions, "budget_remaining": remaining, "order_submitted": bool(submitted)}
 
 @app.get("/trade-cycle")
 def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=False, _auth=Header(default=None), internal: bool=False):
