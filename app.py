@@ -30,7 +30,19 @@ def autonomous_trading_enabled() -> bool:
 
 
 DEFAULT_SYMBOLS = "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA,AMD,AVGO,NFLX"
-SCAN_SYMBOLS = [s.strip().upper() for s in os.getenv("TRADE_SYMBOLS", DEFAULT_SYMBOLS).split(",") if s.strip()]
+# Optional override for testing. When TRADE_SYMBOLS is not set, the bot dynamically
+# discovers Alpaca's current active, tradable U.S. equity universe.
+SCAN_SYMBOLS = [s.strip().upper() for s in os.getenv("TRADE_SYMBOLS", "").split(",") if s.strip()]
+
+def discover_trade_symbols(client: TradingClient) -> list[str]:
+    if SCAN_SYMBOLS:
+        return SCAN_SYMBOLS
+    assets = client.get_all_assets()
+    symbols = []
+    for asset in assets:
+        if str(getattr(asset, "asset_class", "")).lower().endswith("us_equity") and getattr(asset, "status", None) and str(asset.status).lower().endswith("active") and getattr(asset, "tradable", False):
+            symbols.append(asset.symbol.upper())
+    return sorted(set(symbols))
 
 def autonomous_trade_loop() -> None:
     interval = max(int(os.getenv("AUTO_TRADE_INTERVAL_SECONDS", "900")), 300)
@@ -210,8 +222,9 @@ def multi_stock_cycle(execute: bool = False, internal: bool = False):
     remaining = live_budget_remaining(client) if live_trading_enabled() else safe_notional_limit()
     if remaining <= 0:
         return {"status": "blocked", "reason": "Live trading budget exhausted", "budget_remaining": 0.0, "order_submitted": False}
+    scan_symbols = discover_trade_symbols(client)
     signals = []
-    for symbol in SCAN_SYMBOLS:
+    for symbol in scan_symbols:
         try:
             sig = generate_signal(symbol, recent_closes(symbol), 5, 20)
             strength = ((sig.fast_sma / sig.slow_sma) - 1.0) if sig.slow_sma else 0.0
@@ -241,7 +254,7 @@ def multi_stock_cycle(execute: bool = False, internal: bool = False):
         if result.get("order_submitted"):
             submitted.append(result)
             remaining = live_budget_remaining(client)
-    return {"status": "submitted" if submitted else "no_action", "scanned_symbols": SCAN_SYMBOLS, "buy_candidates": [x[0] for x in buys], "submitted_orders": submitted, "actions": actions, "budget_remaining": remaining, "order_submitted": bool(submitted)}
+    return {"status": "submitted" if submitted else "no_action", "scanned_symbols_count": len(scan_symbols), "scanned_symbols": scan_symbols, "buy_candidates": [x[0] for x in buys], "submitted_orders": submitted, "actions": actions, "budget_remaining": remaining, "order_submitted": bool(submitted)}
 
 @app.get("/trade-cycle")
 def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=False, _auth=Header(default=None), internal: bool=False):
