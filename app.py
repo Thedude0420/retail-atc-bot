@@ -41,7 +41,7 @@ def discover_trade_symbols(client: TradingClient) -> list[str]:
     allowed_exchanges = {"NASDAQ", "NYSE", "NYSEARCA", "ARCA", "AMEX", "BATS"}
     symbols = []
     for asset in assets:
-        exchange = str(getattr(asset, "exchange", "")).upper()
+        exchange = str(getattr(asset, "exchange", "")).upper().split(".")[-1]
         if (
             str(getattr(asset, "asset_class", "")).lower().endswith("us_equity")
             and str(getattr(asset, "status", "")).lower().endswith("active")
