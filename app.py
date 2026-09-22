@@ -53,13 +53,13 @@ def discover_trade_symbols(client: TradingClient) -> list[str]:
             symbols.append(asset.symbol.upper())
     return sorted(set(symbols))
 
-def recent_closes_batch(symbols: list[str], days: int = 40) -> dict[str, list[float]]:
-    """Fetch daily bars in batches instead of one request per symbol."""
+def recent_closes_batch(symbols: list[str], days: int = 60) -> dict[str, list[float]]:
+    """Fetch enough daily history in bounded batches for the 20-day SMA strategy."""
     result: dict[str, list[float]] = {}
     if not symbols:
         return result
     end = datetime.now(timezone.utc)
-    batch_size = 100
+    batch_size = 50
     for start_idx in range(0, len(symbols), batch_size):
         batch = symbols[start_idx:start_idx + batch_size]
         request = StockBarsRequest(
@@ -71,10 +71,12 @@ def recent_closes_batch(symbols: list[str], days: int = 40) -> dict[str, list[fl
             feed=DataFeed.IEX,
         )
         bars = data_client().get_stock_bars(request)
-        for symbol in batch:
-            result[symbol.upper()] = [
-                float(bar.close) for bar in bars.data.get(symbol.upper(), [])
-            ]
+        for raw_symbol, raw_bars in bars.data.items():
+            symbol = str(raw_symbol).upper()
+            closes = [float(bar.close) for bar in raw_bars]
+            if len(closes) >= 20:
+                result[symbol] = closes
+    print(f"DATA_BATCH symbols_requested={len(symbols)} symbols_with_20plus_bars={len(result)}", flush=True)
     return result
 
 def autonomous_trade_loop() -> None:
@@ -260,7 +262,10 @@ def multi_stock_cycle(execute: bool = False, internal: bool = False):
     signals = []
     for symbol in scan_symbols:
         try:
-            sig = generate_signal(symbol, close_map.get(symbol, []), 5, 20)
+            closes = close_map.get(symbol, [])
+            if len(closes) < 20:
+                continue
+            sig = generate_signal(symbol, closes, 5, 20)
             strength = ((sig.fast_sma / sig.slow_sma) - 1.0) if sig.slow_sma else 0.0
             signals.append((symbol, sig, strength))
         except Exception as exc:
