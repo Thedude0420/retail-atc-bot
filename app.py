@@ -38,11 +38,44 @@ def discover_trade_symbols(client: TradingClient) -> list[str]:
     if SCAN_SYMBOLS:
         return SCAN_SYMBOLS
     assets = client.get_all_assets()
+    allowed_exchanges = {"NASDAQ", "NYSE", "NYSEARCA", "ARCA", "AMEX", "BATS"}
     symbols = []
     for asset in assets:
-        if str(getattr(asset, "asset_class", "")).lower().endswith("us_equity") and getattr(asset, "status", None) and str(asset.status).lower().endswith("active") and getattr(asset, "tradable", False):
+        exchange = str(getattr(asset, "exchange", "")).upper()
+        if (
+            str(getattr(asset, "asset_class", "")).lower().endswith("us_equity")
+            and str(getattr(asset, "status", "")).lower().endswith("active")
+            and bool(getattr(asset, "tradable", False))
+            and bool(getattr(asset, "fractionable", False))
+            and exchange in allowed_exchanges
+            and not bool(getattr(asset, "ipo", False))
+        ):
             symbols.append(asset.symbol.upper())
     return sorted(set(symbols))
+
+def recent_closes_batch(symbols: list[str], days: int = 40) -> dict[str, list[float]]:
+    """Fetch daily bars in batches instead of one request per symbol."""
+    result: dict[str, list[float]] = {}
+    if not symbols:
+        return result
+    end = datetime.now(timezone.utc)
+    batch_size = 100
+    for start_idx in range(0, len(symbols), batch_size):
+        batch = symbols[start_idx:start_idx + batch_size]
+        request = StockBarsRequest(
+            symbol_or_symbols=batch,
+            timeframe=TimeFrame.Day,
+            start=end - timedelta(days=days),
+            end=end,
+            limit=days,
+            feed=DataFeed.IEX,
+        )
+        bars = data_client().get_stock_bars(request)
+        for symbol in batch:
+            result[symbol.upper()] = [
+                float(bar.close) for bar in bars.data.get(symbol.upper(), [])
+            ]
+    return result
 
 def autonomous_trade_loop() -> None:
     interval = max(int(os.getenv("AUTO_TRADE_INTERVAL_SECONDS", "900")), 300)
@@ -223,10 +256,11 @@ def multi_stock_cycle(execute: bool = False, internal: bool = False):
     if remaining <= 0:
         return {"status": "blocked", "reason": "Live trading budget exhausted", "budget_remaining": 0.0, "order_submitted": False}
     scan_symbols = discover_trade_symbols(client)
+    close_map = recent_closes_batch(scan_symbols)
     signals = []
     for symbol in scan_symbols:
         try:
-            sig = generate_signal(symbol, recent_closes(symbol), 5, 20)
+            sig = generate_signal(symbol, close_map.get(symbol, []), 5, 20)
             strength = ((sig.fast_sma / sig.slow_sma) - 1.0) if sig.slow_sma else 0.0
             signals.append((symbol, sig, strength))
         except Exception as exc:
