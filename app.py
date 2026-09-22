@@ -333,7 +333,11 @@ def trade_cycle(symbol: str="SPY", proposed_notional: float=5.0, execute: bool=F
             result.update(status="blocked",risk_reason="LIVE_ORDER_EXECUTION_ENABLED is false"); return result
         side=OrderSide.BUY if sig.action=="BUY" else OrderSide.SELL
         client_order_id=f"retail-atc-live-{symbol.lower()}-{uuid4().hex}"
-        order=client.submit_order(order_data=MarketOrderRequest(symbol=symbol,notional=decision.max_notional,side=side,time_in_force=TimeInForce.DAY,client_order_id=client_order_id))
+        order_notional = round(float(decision.max_notional), 2)
+        if order_notional <= 0:
+            result.update(status="blocked", risk_reason="Approved notional rounded to zero")
+            return result
+        order=client.submit_order(order_data=MarketOrderRequest(symbol=symbol,notional=order_notional,side=side,time_in_force=TimeInForce.DAY,client_order_id=client_order_id))
         verified=client.get_order_by_client_id(client_order_id)
         result.update(status="submitted",order_submitted=True,order_id=str(verified.id),order_status=str(verified.status),verified=True)
         return result
